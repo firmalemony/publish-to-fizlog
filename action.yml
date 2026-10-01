@@ -1,0 +1,83 @@
+name: Publish to Fizlog
+description: Publish a changelog entry to your Fizlog "what's new" widget when you cut a GitHub release.
+author: Lemony Apps
+branding:
+  icon: bell
+  color: blue
+
+inputs:
+  api-key:
+    description: Your Fizlog project API key (Project page → API access). Store it as a repository secret.
+    required: true
+  title:
+    description: Entry title. Defaults to the release name, then the tag name.
+    required: false
+    default: ""
+  body:
+    description: Entry body (Markdown subset). Defaults to the release notes.
+    required: false
+    default: ""
+  type:
+    description: "Entry type: new, improved or fixed."
+    required: false
+    default: new
+  notify:
+    description: Email the project's subscribers ("true"/"false").
+    required: false
+    default: "false"
+  draft:
+    description: Save as a draft instead of publishing ("true"/"false").
+    required: false
+    default: "false"
+  api-url:
+    description: Fizlog entries endpoint (change only if you self-host Fizlog).
+    required: false
+    default: https://fizlog.com/api/entries.php
+
+outputs:
+  entry-id:
+    description: ID of the created entry.
+    value: ${{ steps.publish.outputs.entry-id }}
+  public-page:
+    description: URL of the project's public changelog page.
+    value: ${{ steps.publish.outputs.public-page }}
+
+runs:
+  using: composite
+  steps:
+    - id: publish
+      shell: bash
+      env:
+        FIZLOG_API_KEY: ${{ inputs.api-key }}
+        FIZLOG_API_URL: ${{ inputs.api-url }}
+        FIZLOG_TITLE: ${{ inputs.title != '' && inputs.title || github.event.release.name || github.event.release.tag_name || github.ref_name }}
+        FIZLOG_BODY: ${{ inputs.body != '' && inputs.body || github.event.release.body }}
+        FIZLOG_TYPE: ${{ inputs.type }}
+        FIZLOG_NOTIFY: ${{ inputs.notify }}
+        FIZLOG_DRAFT: ${{ inputs.draft }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::$FIZLOG_API_KEY"
+        if [ -z "$FIZLOG_TITLE" ]; then
+          echo "::error::No title: pass 'title' or run the action on a release event."
+          exit 1
+        fi
+        payload=$(jq -n \
+          --arg title "$FIZLOG_TITLE" \
+          --arg body "${FIZLOG_BODY:-}" \
+          --arg type "$FIZLOG_TYPE" \
+          --argjson notify "$([ "$FIZLOG_NOTIFY" = "true" ] && echo true || echo false)" \
+          --argjson published "$([ "$FIZLOG_DRAFT" = "true" ] && echo false || echo true)" \
+          '{title: $title, body: $body, type: $type, notify: $notify, is_published: $published}')
+        response=$(mktemp)
+        status=$(curl -sS -o "$response" -w '%{http_code}' -X POST "$FIZLOG_API_URL" \
+          -H "Authorization: Bearer $FIZLOG_API_KEY" \
+          -H "Content-Type: application/json" \
+          --data "$payload")
+        if [ "$status" != "201" ]; then
+          echo "::error::Fizlog returned HTTP $status: $(jq -r '.error // .' "$response" 2>/dev/null || cat "$response")"
+          exit 1
+        fi
+        echo "entry-id=$(jq -r '.entry.id // empty' "$response")" >> "$GITHUB_OUTPUT"
+        echo "public-page=$(jq -r '.public_page // empty' "$response")" >> "$GITHUB_OUTPUT"
+        echo "Published \"$FIZLOG_TITLE\" to Fizlog: $(jq -r '.public_page // empty' "$response")"
